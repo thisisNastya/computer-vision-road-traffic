@@ -1,0 +1,479 @@
+# =========================================================
+# INSTALL
+# =========================================================
+
+!pip install -q ultralytics flask opencv-python yt-dlp flask-cors
+!apt-get -qq install ffmpeg
+
+# Cloudflare
+!wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+!chmod +x cloudflared-linux-amd64
+
+
+# =========================================================
+# IMPORTS
+# =========================================================
+
+import cv2
+import numpy as np
+import subprocess
+import threading
+import time
+import json
+import re
+
+from flask import Flask, Response, jsonify, request
+from flask_cors import CORS
+from ultralytics import YOLO
+
+
+# =========================================================
+# FLASK
+# =========================================================
+
+app = Flask(__name__)
+CORS(app)
+
+
+# =========================================================
+# GLOBAL VARIABLES
+# =========================================================
+
+seen_ids = set()
+object_class_by_id = {}
+
+start_time = time.time()
+
+ffmpeg_process = None
+current_stream_url = None
+current_frame = None
+lock = threading.Lock()
+stop_processing = False
+
+FRAME_W = 720
+FRAME_H = 576
+
+# YOLO
+model = YOLO("yolov8n.pt")
+CLASSES = [0,2,3,5,7]
+
+# stats
+stats = {
+    "stream_url": None,
+    "status": "idle",
+    "frames": 0,
+
+    "objects_current": {
+        "person": 0,
+        "car": 0,
+        "motorcycle": 0,
+        "bus": 0,
+        "truck": 0
+    },
+
+    "objects_total": {
+        "person": 0,
+        "car": 0,
+        "motorcycle": 0,
+        "bus": 0,
+        "truck": 0
+    },
+
+    "unique_objects": {
+        "person": 0,
+        "car": 0,
+        "motorcycle": 0,
+        "bus": 0,
+        "truck": 0
+    },
+
+    "flow_per_minute": {
+        "person": 0,
+        "vehicles": 0
+    }
+}
+
+
+# =========================================================
+# EXTRACT STREAM
+# =========================================================
+
+def extract_stream_url(url):
+
+    print("[STREAM] input:",url)
+
+    # normalize youtube link
+    if "youtube.com/live/" in url:
+        vid=url.split("/live/")[1].split("?")[0]
+        url=f"https://www.youtube.com/watch?v={vid}"
+
+    try:
+
+        cmd=[
+            "yt-dlp",
+            "-f","best[protocol=m3u8]/best",
+            "-g",
+            "--no-playlist",
+            url
+        ]
+
+        res=subprocess.run(cmd,capture_output=True,text=True,timeout=30)
+
+        lines=[l for l in res.stdout.split("\n") if l.startswith("http")]
+
+        if lines:
+            print("[STREAM] HLS found")
+            return lines[0]
+
+    except Exception as e:
+        print("[STREAM] error:",e)
+
+    return None
+
+
+# =========================================================
+# OPEN FFMPEG
+# =========================================================
+
+def open_stream(url):
+    print("[FFMPEG] opening stream:", url)
+    return subprocess.Popen(
+        [
+            "ffmpeg",
+            "-loglevel", "error",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-probesize", "32",
+            "-analyzeduration", "0",
+            "-re",                       
+            "-i", url,
+
+            "-vf", f"scale={FRAME_W}:{FRAME_H}",
+
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-an", "-"
+        ],
+        stdout=subprocess.PIPE,
+        bufsize=10**6   # уменьшить буфер до 1MB
+    )
+
+
+# =========================================================
+# READ FRAME
+# =========================================================
+
+def read_frame(proc):
+
+    size=FRAME_W*FRAME_H*3
+
+    raw=proc.stdout.read(size)
+
+    if len(raw)!=size:
+        return None
+
+    frame=np.frombuffer(raw,np.uint8).reshape((FRAME_H,FRAME_W,3))
+
+    return frame
+
+
+# =========================================================
+# VIDEO PROCESSING
+# =========================================================
+
+def video_loop():
+
+    global ffmpeg_process
+    global current_frame
+    global stats
+
+    print("[VIDEO] processing thread started")
+
+    while not stop_processing:
+
+        if ffmpeg_process is None:
+            time.sleep(1)
+            continue
+
+        frame=read_frame(ffmpeg_process)
+
+        if frame is None:
+            print("[VIDEO] frame lost, reconnecting")
+
+            try:
+                ffmpeg_process.terminate()
+            except:
+                pass
+
+            ffmpeg_process=None
+            stats["status"]="reconnecting"
+
+            time.sleep(3)
+            continue
+
+        # YOLO
+        results = model.track(frame, classes=CLASSES, persist=True, verbose=False)
+
+        if results:
+
+            r = results[0]
+            frame = r.plot()
+
+            processing_time = time.time() - frame_start_time  # добавь frame_start_time = time.time() перед track
+            print(f"[FPS] Обработка кадра: {1/processing_time:.1f} FPS", end='\r')
+
+            # reset current counters
+            stats["objects_current"] = {
+                "person":0,
+                "car":0,
+                "motorcycle":0,
+                "bus":0,
+                "truck":0
+            }
+
+            if r.boxes is not None:
+
+                class_ids = r.boxes.cls.cpu().tolist()
+                track_ids = r.boxes.id.cpu().tolist() if r.boxes.id is not None else []
+
+                class_map = {
+                    0:"person",
+                    2:"car",
+                    3:"motorcycle",
+                    5:"bus",
+                    7:"truck"
+                }
+
+                for i,cls in enumerate(class_ids):
+
+                    name = class_map.get(cls)
+
+                    if not name:
+                        continue
+
+                    stats["objects_current"][name]+=1
+                    stats["objects_total"][name]+=1
+
+                    # tracking unique
+                    if i < len(track_ids):
+
+                        tid = track_ids[i]
+
+                        if tid not in seen_ids:
+
+                            seen_ids.add(tid)
+
+                            stats["unique_objects"][name]+=1
+                            object_class_by_id[tid]=name
+
+        ret,buffer=cv2.imencode(".jpg",frame,[cv2.IMWRITE_JPEG_QUALITY,70])
+
+        if ret:
+            current_frame=buffer.tobytes()
+
+        stats["frames"]+=1
+
+    elapsed = time.time() - start_time
+
+    if elapsed > 0:
+
+        stats["flow_per_minute"]["person"] = round(
+            stats["unique_objects"]["person"] / (elapsed/60),2
+        )
+
+        vehicle_total = (
+            stats["unique_objects"]["car"] +
+            stats["unique_objects"]["motorcycle"] +
+            stats["unique_objects"]["bus"] +
+            stats["unique_objects"]["truck"]
+        )
+
+        stats["flow_per_minute"]["vehicles"] = round(
+            vehicle_total / (elapsed/60),2
+        )
+
+# =========================================================
+# ROUTES
+# =========================================================
+
+@app.route("/set_stream",methods=["GET"])
+def set_stream():
+
+    global ffmpeg_process
+    global current_stream_url
+    global stats
+
+    url=request.args.get("url")
+
+    if not url:
+        return jsonify({"error":"no url"}),400
+
+    stream=extract_stream_url(url)
+
+    if not stream:
+        return jsonify({"error":"cannot extract stream"}),500
+
+    with lock:
+
+        if ffmpeg_process:
+            try:
+                ffmpeg_process.terminate()
+                ffmpeg_process = None
+                time.sleep(1)  # дать время на остановку
+            except:
+                pass
+
+        ffmpeg_process=open_stream(stream)
+
+    current_stream_url=url
+
+    stats["stream_url"]=url
+    stats["status"]="streaming"
+    stats["frames"]=0
+
+    print("[STREAM] connected")
+
+    return jsonify({"status":"ok","extracted_url":stream})
+
+
+@app.route("/video_feed")
+def video_feed():
+
+    def generate():
+
+        global current_frame
+
+        while True:
+
+            if current_frame is None:
+
+                img=np.zeros((FRAME_H,FRAME_W,3),dtype=np.uint8)
+
+                cv2.putText(
+                    img,
+                    "Waiting for stream...",
+                    (200,270),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (255,255,255),
+                    2
+                )
+
+                ret,buf=cv2.imencode(".jpg",img)
+
+                frame=buf.tobytes()
+
+            else:
+
+                frame=current_frame
+
+            yield(
+                b'--frame\r\n'
+                b'Content-Type: image/jpeg\r\n\r\n'+
+                frame+
+                b'\r\n'
+            )
+
+            time.sleep(0.01)
+
+    return Response(generate(),mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route("/stats")
+def get_stats():
+    # Пересчитываем flow_per_minute каждый раз (если нужно)
+    elapsed = time.time() - start_time
+    if elapsed > 60:  # чтобы не делить на ноль
+        stats["flow_per_minute"]["person"] = round(
+            stats["unique_objects"]["person"] / (elapsed/60), 2
+        )
+        vehicle_total = sum(stats["unique_objects"][k] for k in ["car", "motorcycle", "bus", "truck"])
+        stats["flow_per_minute"]["vehicles"] = round(vehicle_total / (elapsed/60), 2)
+    else:
+        stats["flow_per_minute"] = {"person": 0, "vehicles": 0}
+
+    return jsonify(stats)
+
+
+@app.route("/health")
+def health():
+
+    return jsonify({
+        "stream_active":ffmpeg_process is not None,
+        "stream_url":current_stream_url
+    })
+
+
+# =========================================================
+# START SERVER
+# =========================================================
+
+def start_flask():
+
+    print("[FLASK] starting")
+
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        threaded=True,
+        debug=False,
+        use_reloader=False
+    )
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
+flask_thread=threading.Thread(target=start_flask,daemon=True)
+flask_thread.start()
+
+video_thread=threading.Thread(target=video_loop,daemon=True)
+video_thread.start()
+
+time.sleep(2)
+
+print("[TUNNEL] starting cloudflare")
+
+tunnel=subprocess.Popen(
+    ["./cloudflared-linux-amd64","tunnel","--url","http://localhost:5000"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True
+)
+
+public_url=None
+
+start_time=time.time()
+
+while time.time() - start_time < 60:  # ждём max 60 сек
+
+    line=tunnel.stdout.readline().strip()
+
+    if line:
+        print(line)
+
+    m=re.search(r"https://\S+\.trycloudflare\.com",line)
+
+    if m:
+        public_url=m.group(0)
+        break
+
+if public_url:
+    print("\n==============================")
+    print("BACKEND READY")
+    print("URL:",public_url)
+    print("VIDEO:",public_url+"/video_feed")
+    print("STATS:",public_url+"/stats")
+    print("HEALTH:",public_url+"/health")
+    print("SET STREAM (пример):",public_url + "/set_stream?url=ССЫЛКА_НА_ТРАНСЛЯЦИЮ")
+    print("==============================")
+
+else:
+    print("\nНе удалось найти URL за 60 сек. Проверь вывод выше.")
+
+print("\nServer running...")
+
+# Держим запущенным
+while True:
+    time.sleep(60)
