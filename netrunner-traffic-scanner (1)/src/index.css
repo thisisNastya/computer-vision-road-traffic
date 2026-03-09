@@ -1,0 +1,81 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Rajdhani:wght@300;400;500;600;700&family=VT323&display=swap');
+
+@theme {
+  --font-orbitron: "Orbitron", sans-serif;
+  --font-rajdhani: "Rajdhani", sans-serif;
+  --font-vt323: "VT323", monospace;
+  
+  --color-cyber-bg: #0a0a0f;
+  --color-cyber-cyan: #00ffff;
+  --color-cyber-magenta: #ff008d;
+  --color-cyber-yellow: #f3e600;
+  --color-cyber-purple: #711c91;
+  --color-cyber-blue: #091833;
+}
+
+@layer base {
+  body {
+    @apply bg-cyber-bg text-cyber-cyan font-rajdhani overflow-x-hidden;
+    background: radial-gradient(circle at center, #0d0d1a 0%, #05050a 100%);
+  }
+
+  .cyber-glow-text {
+    text-shadow: 0 0 10px rgba(0, 255, 255, 0.7), 0 0 20px rgba(0, 255, 255, 0.3);
+  }
+
+  .cyber-glow-magenta {
+    text-shadow: 0 0 10px rgba(255, 0, 141, 0.7), 0 0 20px rgba(255, 0, 141, 0.3);
+  }
+
+  .cyber-border {
+    @apply border border-cyber-cyan/30 shadow-[0_0_15px_rgba(0,255,255,0.1)];
+  }
+
+  .cyber-border-magenta {
+    @apply border border-cyber-magenta/30 shadow-[0_0_15px_rgba(255,0,141,0.1)];
+  }
+
+  /* Glitch Animation */
+  @keyframes glitch {
+    0% { transform: translate(0); }
+    20% { transform: translate(-2px, 2px); }
+    40% { transform: translate(-2px, -2px); }
+    60% { transform: translate(2px, 2px); }
+    80% { transform: translate(2px, -2px); }
+    100% { transform: translate(0); }
+  }
+
+  .glitch-hover:hover {
+    animation: glitch 0.2s infinite;
+  }
+
+  /* Scanlines Effect */
+  .scanlines::before {
+    content: " ";
+    display: block;
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    right: 0;
+    background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 118, 0.06));
+    z-index: 2;
+    background-size: 100% 2px, 3px 100%;
+    pointer-events: none;
+  }
+}
+
+.cyber-button {
+  @apply relative px-6 py-2 font-orbitron font-bold uppercase tracking-widest transition-all duration-200;
+  clip-path: polygon(10% 0, 100% 0, 100% 70%, 90% 100%, 0 100%, 0 30%);
+}
+
+.clip-path-cyber {
+  clip-path: polygon(10% 0, 100% 0, 100% 70%, 90% 100%, 0 100%, 0 30%);
+}
+
+.cyber-input {
+  @apply bg-black/40 border border-cyber-cyan/50 px-4 py-3 text-cyber-cyan font-vt323 text-xl focus:outline-none focus:border-cyber-cyan focus:shadow-[0_0_10px_rgba(0,255,255,0.5)] transition-all;
+}
+

@@ -1,0 +1,5 @@
+{
+  "name": "Netrunner Traffic Scanner",
+  "description": "Панель мониторинга трафика в футуристическом стиле с интеграцией живого потока и статистикой нейронной сети.",
+  "requestFramePermissions": []
+}
